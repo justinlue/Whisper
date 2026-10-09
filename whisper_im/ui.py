@@ -25,6 +25,16 @@ EVERYONE = "*"
 INCOGNITO_BG = "#3b2a5a"
 RECORDING_BG = "#a32020"
 OFFER_WAIT = 120
+ME_COLOR = "#1a5fb4"
+# Dark enough to read as body text on white; no blue (me, links) or red (failures).
+PEER_COLORS = ("#1b7a43", "#a8550a", "#813d9c", "#0b7285", "#b0306a", "#6b6b00")
+
+
+def speaker_color(assigned: dict, who) -> str:
+    """Colour for a peer's lines; the first sighting of `who` claims the next one."""
+    if who not in assigned:
+        assigned[who] = PEER_COLORS[len(assigned) % len(PEER_COLORS)]
+    return assigned[who]
 
 
 def human_size(n: float) -> str:
@@ -121,6 +131,7 @@ class App:
         self.convs = {EVERYONE: Conversation(EVERYONE, "Everyone")}
         self.order = [EVERYONE]
         self.current = EVERYONE
+        self.colors: dict = {}    # peer addr -> colour of their lines
         self.node = Node(cfg["nickname"], cfg["port"], self.events.put,
                          bind_host=cfg.get("bind", ""))
         self.node.offer_handler = self._offer_from_thread
@@ -211,12 +222,16 @@ class App:
         scroll = ttk.Scrollbar(chat)
         scroll.pack(side="right", fill="y")
         self.chat = tk.Text(chat, state="disabled", wrap="word", font=("Segoe UI", 10),
-                            yscrollcommand=scroll.set)
+                            padx=10, pady=6, spacing2=2, yscrollcommand=scroll.set)
         self.chat.pack(fill="both", expand=True)
         scroll.config(command=self.chat.yview)
+        # "gap" sits on the first character of an item, so the space opens
+        # between messages and not between the lines of one message.
+        self.chat.tag_config("gap", spacing1=9)
         self.chat.tag_config("meta", foreground="#777777")
-        self.chat.tag_config("me", foreground="#1a5fb4")
-        self.chat.tag_config("them", foreground="#26a269")
+        for color in (ME_COLOR, *PEER_COLORS):
+            self.chat.tag_config(color, foreground=color)
+        self.chat.tag_config("name", font=("Segoe UI", 10, "bold"))
         self.chat.tag_config("fail", foreground="#b00020")
         self.chat.tag_config("link", foreground="#1a5fb4", underline=True)
         body.add(right, weight=3)
@@ -282,13 +297,13 @@ class App:
     def _render_item(self, conv: Conversation, index: int, item: dict):
         chat = self.chat
         stamp = time.strftime("%H:%M", time.localtime(item["ts"]))
-        chat.insert("end", f"[{stamp}] ", "meta")
-        chat.insert("end", ("me" if item["out"] else item["nick"]) + ": ",
-                    "me" if item["out"] else "them")
+        color = ME_COLOR if item["out"] else speaker_color(self.colors, item["who"])
+        chat.insert("end", f"[{stamp}] ", ("meta", "gap"))
+        chat.insert("end", ("me" if item["out"] else item["nick"]) + ": ", (color, "name"))
         if item["kind"] == "msg":
-            chat.insert("end", item["text"])
+            chat.insert("end", item["text"], color)
         else:
-            chat.insert("end", f"[file] {item['name']} ({human_size(item['size'])})")
+            chat.insert("end", f"[file] {item['name']} ({human_size(item['size'])})", color)
             if not item["out"]:
                 note = " — deleted when Whisper closes" if item.get("incognito") else ""
                 chat.insert("end", f"\n        saved to {item['path']}{note}", "meta")
@@ -561,7 +576,8 @@ class App:
         elif kind in ("message", "broadcast"):
             sender = self._conv(ev["addr"], ev["nick"])
             conv = sender if kind == "message" else self.convs[EVERYONE]
-            self._add_item(conv, kind="msg", out=False, nick=ev["nick"], text=ev["text"])
+            self._add_item(conv, kind="msg", out=False, nick=ev["nick"], who=ev["addr"],
+                           text=ev["text"])
             self.session.record(kind=kind, dir="in", peer=ev["addr"][0],
                                 nick=ev["nick"], text=ev["text"])
             self._incoming(conv)
@@ -583,8 +599,9 @@ class App:
         elif kind == "file_received":
             conv = self._conv(ev["addr"], ev["nick"])
             incognito = Path(ev["path"]).parent == incognito_dir()
-            self._add_item(conv, kind="file", out=False, nick=ev["nick"], name=ev["name"],
-                           size=ev["size"], path=ev["path"], incognito=incognito)
+            self._add_item(conv, kind="file", out=False, nick=ev["nick"], who=ev["addr"],
+                           name=ev["name"], size=ev["size"], path=ev["path"],
+                           incognito=incognito)
             self.session.record(kind="file", dir="in", peer=ev["addr"][0], nick=ev["nick"],
                                 name=ev["name"], size=ev["size"], path=ev["path"])
             self._set_status(f"Received {ev['name']}")

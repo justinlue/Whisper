@@ -34,4 +34,4 @@ Tests set `WHISPER_HOME` to a temp dir and `WHISPER_ARGON2_TIME/MEM` low (see `t
 
 ## Testing
 
-Non-UI modules are covered by pytest. `ui.py` has no automated tests; check it by running two instances on different machines, or one instance against a `Node` on loopback with `bind`/`port` set in `config.json`.
+Non-UI modules are covered by pytest. In `ui.py` only the pure helpers are tested (`tests/test_ui.py`); check the widgets by running two instances on different machines, or one instance against a `Node` on loopback with `bind`/`port` set in `config.json`.
