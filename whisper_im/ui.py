@@ -28,6 +28,19 @@ OFFER_WAIT = 120
 ME_COLOR = "#1a5fb4"
 # Dark enough to read as body text on white; no blue (me, links) or red (failures).
 PEER_COLORS = ("#1b7a43", "#a8550a", "#813d9c", "#0b7285", "#b0306a", "#6b6b00")
+# Single code points only: Tk 8.6 draws a flag, family or skin-toned emoji as
+# its separate parts.
+EMOJI = tuple(
+    "😀😁😂🤣😊😉😍😘😎🤔"
+    "😅😇🙂🙃😋😜🤗🤩🥳😴"
+    "😐😑😶🙄😏😬😮😲😳🥺"
+    "😢😭😤😠😡🤯😱😨🤒🤮"
+    "👍👎👌👏🙏💪👋🤝🤞🤙"
+    "💯🔥✨🎉🎂🎁💡📌📎🔒"
+    "❤💔💕💖💘💝🎵🎶💰💤"
+    "☕🍺🍜🍕🍰🌙🌞🌧⭐⚡"
+    "✅❌❓❗⏰📅📞💻🚀👀")
+EMOJI_COLUMNS = 10
 
 
 def speaker_color(assigned: dict, who) -> str:
@@ -219,9 +232,14 @@ class App:
         ttk.Button(bottom, text="Send", command=self._send).pack(side="right")
         self.file_btn = ttk.Button(bottom, text="Send file…", command=self._send_files)
         self.file_btn.pack(side="right", padx=6)
+        ttk.Button(bottom, text="Emoji", width=7,
+                   command=self._toggle_emoji).pack(side="right")
+        self.emoji_win = None
         self.input = tk.Text(right, height=3, wrap="word", font=("Segoe UI", 10))
         self.input.pack(side="bottom", fill="x", pady=6)
         self.input.bind("<Return>", self._on_return)
+        # Picking an emoji hands focus back here, so Escape must work from here too.
+        self.input.bind("<Escape>", lambda e: self.emoji_win and self._close_emoji())
         self.input.bind("<KeyRelease>", lambda e: self._render_counter())
 
         chat = ttk.Frame(right)
@@ -479,6 +497,37 @@ class App:
             return None
         self._send()
         return "break"
+
+    def _toggle_emoji(self):
+        if self.emoji_win is not None:
+            self._close_emoji()
+            return
+        win = self.emoji_win = tk.Toplevel(self.root)
+        win.title("Emoji")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.protocol("WM_DELETE_WINDOW", self._close_emoji)
+        win.bind("<Escape>", lambda e: self._close_emoji())
+        for n, emoji in enumerate(EMOJI):
+            tk.Button(win, text=emoji, font=("Segoe UI Emoji", 13), width=2,
+                      relief="flat", takefocus=False,
+                      command=lambda e=emoji: self._insert_emoji(e)).grid(
+                row=n // EMOJI_COLUMNS, column=n % EMOJI_COLUMNS)
+        # Above the input box, so it covers the chat rather than what is being typed.
+        win.update_idletasks()
+        win.geometry(f"+{self.input.winfo_rootx()}"
+                     f"+{max(0, self.input.winfo_rooty() - win.winfo_reqheight() - 40)}")
+
+    def _close_emoji(self):
+        self.emoji_win.destroy()
+        self.emoji_win = None
+        self.input.focus_set()
+
+    def _insert_emoji(self, emoji: str):
+        self.input.insert("insert", emoji)
+        self.input.see("insert")
+        self.input.focus_set()
+        self._render_counter()
 
     def _send(self):
         text = whole_characters(self.input.get("1.0", "end-1c")).strip()

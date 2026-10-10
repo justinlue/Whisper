@@ -1,4 +1,4 @@
-from whisper_im.ui import ME_COLOR, PEER_COLORS, speaker_color, whole_characters
+from whisper_im.ui import EMOJI, ME_COLOR, PEER_COLORS, speaker_color, whole_characters
 
 
 def test_a_speaker_keeps_their_colour():
@@ -39,3 +39,13 @@ def test_half_an_emoji_becomes_something_sendable():
     cleaned = whole_characters("a\ud83dX\ude00b")
     cleaned.encode()
     assert cleaned == "a\N{REPLACEMENT CHARACTER}X\N{REPLACEMENT CHARACTER}b"
+
+
+def test_picker_offers_each_emoji_once():
+    assert len(set(EMOJI)) == len(EMOJI) > 0
+
+
+def test_picker_emoji_are_ones_tk_draws_as_a_single_glyph():
+    # Tk 8.6 shows a flag, family or skin-toned emoji as its separate parts.
+    for emoji in EMOJI:
+        assert len(emoji.removesuffix("\N{VARIATION SELECTOR-16}")) == 1, emoji

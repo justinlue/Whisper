@@ -37,8 +37,9 @@ Whisper can run per computer; a second launch reports that the port is taken.
   `retry` link. Nothing is queued.
 - **Block** drops everything from that IP until you close Whisper.
 - Enter sends, Shift+Enter starts a new line.
-- **Emoji** work in messages and names: press `Win` + `.` for the Windows emoji
-  panel, or paste them. They are drawn in one colour, and combined emoji (flags,
+- **Emoji** work in messages and names: the *Emoji* button opens a picker that
+  stays open until you close it or press Esc; `Win` + `.` (the Windows emoji
+  panel) and paste work too. They are drawn in one colour, and combined emoji (flags,
   families, skin tones) may show as their separate parts.
 
 ## Incognito mode
