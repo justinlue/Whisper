@@ -37,6 +37,13 @@ def speaker_color(assigned: dict, who) -> str:
     return assigned[who]
 
 
+def whole_characters(text: str) -> str:
+    """Text as Tk hands it over, made safe to encode. Tk 8.6 counts an emoji
+    as two characters, so an edit can leave half of one behind; a half becomes
+    U+FFFD, and two halves that Tk returned separately are joined."""
+    return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+
+
 def human_size(n: float) -> str:
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -324,7 +331,7 @@ class App:
         chat.insert("end", "\n")
 
     def _render_counter(self):
-        used = len(self.input.get("1.0", "end-1c").encode())
+        used = len(whole_characters(self.input.get("1.0", "end-1c")).encode())
         limit = MAX_BROADCAST if self.current == EVERYONE else MAX_TEXT
         if self.current == EVERYONE or used > limit:
             self.counter.config(text=f"{used} / {limit} bytes",
@@ -455,7 +462,7 @@ class App:
                 self.root.config(cursor="")
 
     def _save_nick(self, event=None):
-        nick = self.nick_entry.get().strip()[:config.MAX_NICK]
+        nick = whole_characters(self.nick_entry.get()).strip()[:config.MAX_NICK]
         if not nick or nick == self.cfg["nickname"]:
             return
         self.cfg["nickname"] = self.node.nick = nick
@@ -474,7 +481,7 @@ class App:
         return "break"
 
     def _send(self):
-        text = self.input.get("1.0", "end-1c").strip()
+        text = whole_characters(self.input.get("1.0", "end-1c")).strip()
         if not text:
             return
         conv = self.convs[self.current]

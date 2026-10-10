@@ -1,4 +1,5 @@
 """Two real nodes talking over loopback."""
+import json
 import os
 import socket
 import time
@@ -6,6 +7,7 @@ import time
 import pytest
 
 from whisper_im.net import MAX_BROADCAST, Declined, DeliveryError, Node
+from whisper_im.wire import encode_datagram
 
 HOST = "127.0.0.1"
 
@@ -182,7 +184,25 @@ def test_second_instance_on_same_port_fails(pair):
 
 
 def test_incompatible_datagram_is_reported(pair):
-    from whisper_im.wire import encode_datagram
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.sendto(encode_datagram({"t": "hello"}, version=9), pair.addr_b)
     wait_for(lambda: of_type(pair.eb, "incompatible"))
+
+
+def test_emoji_nickname_and_broadcast_arrive_whole(pair):
+    pair.a.nick = "alice 🦊"
+    pair.a.send_broadcast("lunch? 🍜👍🏽")
+    msg = wait_for(lambda: of_type(pair.eb, "broadcast"))[0]
+    assert msg["text"] == "lunch? 🍜👍🏽" and msg["nick"] == "alice 🦊"
+
+
+def test_half_an_emoji_from_a_peer_never_reaches_the_ui(pair):
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.sendto(b"WSPR\x01" + rb'{"t": "msg", "text": "\ud83d", "iid": "x"}',
+                 pair.addr_b)
+        s.sendto(b"WSPR\x01" + rb'{"t": "hello", "nick": "\ude00", "iid": "x"}',
+                 pair.addr_b)
+        s.sendto(encode_datagram({"t": "msg", "text": "after", "iid": "x"}), pair.addr_b)
+    wait_for(lambda: any(e["text"] == "after" for e in of_type(pair.eb, "broadcast")))
+    for event in pair.eb:
+        json.dumps(event, ensure_ascii=False).encode()

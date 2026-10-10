@@ -3,7 +3,7 @@ import threading
 
 import pytest
 
-from whisper_im.wire import (KIND_CHUNK, IncompatibleVersion, ProtocolError,
+from whisper_im.wire import (KIND_CHUNK, KIND_JSON, IncompatibleVersion, ProtocolError,
                              decode_datagram, encode_datagram, handshake)
 
 
@@ -126,3 +126,35 @@ def test_datagram_version_mismatch():
 def test_garbage_datagrams_rejected(data):
     with pytest.raises(ProtocolError):
         decode_datagram(data)
+
+
+# What a peer gets by cutting an emoji in half: json.loads accepts the escape,
+# but the resulting string cannot be encoded, saved or sent on.
+HALF_EMOJI = rb'{"t": "msg", "text": "\ud83d"}'
+
+
+def test_datagram_with_half_an_emoji_is_rejected():
+    with pytest.raises(ProtocolError):
+        decode_datagram(b"WSPR\x01" + HALF_EMOJI)
+    with pytest.raises(ProtocolError):
+        decode_datagram(b"WSPR\x01" + rb'{"t": "hello", "nick": {"\udc00": 1}}')
+
+
+def test_control_frame_with_half_an_emoji_is_rejected():
+    a, b, _ = _pair()
+    a.send(KIND_JSON, HALF_EMOJI)
+    with pytest.raises(ProtocolError):
+        b.recv_json()
+    a.close()
+    b.close()
+
+
+def test_emoji_sequences_survive_both_transports():
+    text = "👍🏽 👨‍👩‍👧 🇨🇳 ❤️"
+    assert decode_datagram(encode_datagram({"text": text})) == {"text": text}
+    assert decode_datagram(b"WSPR\x01" + rb'{"text": "\ud83d' + rb'\ude00"}') == {"text": "😀"}
+    a, b, _ = _pair()
+    a.send_json({"text": text})
+    assert b.recv_json() == {"text": text}
+    a.close()
+    b.close()

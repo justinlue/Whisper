@@ -37,6 +37,17 @@ class IncompatibleVersion(ProtocolError):
     pass
 
 
+def _loads(data: bytes) -> dict:
+    """JSON object from a peer. Raises ValueError if it is not one."""
+    obj = json.loads(data)
+    if not isinstance(obj, dict):
+        raise ValueError("not an object")
+    # "\ud83d" is legal JSON for half an emoji, but the resulting str cannot
+    # be encoded, so it could be neither saved to history nor sent on.
+    json.dumps(obj, ensure_ascii=False).encode()
+    return obj
+
+
 def recv_exact(sock: socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
@@ -81,12 +92,9 @@ class Channel:
         if kind != KIND_JSON:
             raise ProtocolError("expected a control frame")
         try:
-            obj = json.loads(data)
+            return _loads(data)
         except ValueError:
             raise ProtocolError("malformed control frame") from None
-        if not isinstance(obj, dict):
-            raise ProtocolError("malformed control frame")
-        return obj
 
     def close(self) -> None:
         try:
@@ -123,9 +131,6 @@ def decode_datagram(data: bytes) -> dict:
     if data[4] != VERSION:
         raise IncompatibleVersion(f"peer speaks protocol version {data[4]}")
     try:
-        obj = json.loads(data[5:])
+        return _loads(data[5:])
     except ValueError:
         raise ProtocolError("malformed datagram") from None
-    if not isinstance(obj, dict):
-        raise ProtocolError("malformed datagram")
-    return obj
