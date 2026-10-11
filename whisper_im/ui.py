@@ -11,12 +11,14 @@ import threading
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from . import config
 from .crypto import MIN_PIN_LEN, validate_pin
 from .files import incognito_files
+from .groups import Groups
 from .history import WrongPin
+from .markup import MENTION, MENTION_ME, emoji_pieces, mentions, mentions_me
 from .net import MAX_BROADCAST, MAX_TEXT, Declined, DeliveryError, Node
 from .paths import files_dir, incognito_dir
 from .session import Session
@@ -28,8 +30,10 @@ OFFER_WAIT = 120
 ME_COLOR = "#1a5fb4"
 # Dark enough to read as body text on white; no blue (me, links) or red (failures).
 PEER_COLORS = ("#1b7a43", "#a8550a", "#813d9c", "#0b7285", "#b0306a", "#6b6b00")
-# Single code points only: Tk 8.6 draws a flag, family or skin-toned emoji as
-# its separate parts.
+MENTION_BG = "#fff1b8"
+MENTION_ME_BG = "#ffd43b"
+# Single code points only: a flag, family or skin-toned emoji is drawn as its
+# separate parts.
 EMOJI = tuple(
     "😀😁😂🤣😊😉😍😘😎🤔"
     "😅😇🙂🙃😋😜🤗🤩🥳😴"
@@ -76,15 +80,118 @@ def parse_addr(text: str, default_port: int) -> tuple[str, int]:
     return ip, port
 
 
+class EmojiImages:
+    """Colour pictures of emoji. Tk 8.6 draws emoji in one colour, so they are
+    rendered with Pillow from the system emoji font and put in the widgets as
+    images. Without Pillow or the font, `get` returns None and the caller
+    shows the character as text."""
+
+    FONT = "seguiemj.ttf"
+    ABSENT = "􏿿"       # in no font
+
+    def __init__(self, size: int):
+        self.size = size          # side of the square picture, in pixels
+        self._images: dict = {}
+        self._font = self._draw = None
+        try:
+            from PIL import Image, ImageDraw, ImageFont, ImageTk
+            self._font = ImageFont.truetype(self.FONT, size * 2)
+            self._draw = (Image, ImageDraw, ImageTk)
+        except (ImportError, OSError):
+            pass
+
+    def get(self, emoji: str):
+        if self._font is None:
+            return None
+        if emoji not in self._images:
+            self._images[emoji] = self._render(emoji)
+        return self._images[emoji]
+
+    def _render(self, emoji: str):
+        Image, ImageDraw, ImageTk = self._draw
+        try:
+            left, top, right, bottom = self._font.getbbox(emoji)
+            glyph = Image.new("RGBA", (max(1, right - left), max(1, bottom - top)))
+            ImageDraw.Draw(glyph).text((-left, -top), emoji, font=self._font,
+                                       embedded_color=True)
+            ink = glyph.getbbox()
+            # A character the font lacks comes out blank or as the same box
+            # as any other it lacks.
+            if ink is None or (bytes(self._font.getmask(emoji))
+                               == bytes(self._font.getmask(self.ABSENT))):
+                return None
+            # Drawn large and cut to its ink, so it fills the square when shrunk.
+            glyph = glyph.crop(ink)
+            glyph.thumbnail((self.size, self.size))
+            image = Image.new("RGBA", (self.size, self.size))
+            image.paste(glyph, ((self.size - glyph.width) // 2,
+                                (self.size - glyph.height) // 2))
+            return ImageTk.PhotoImage(image)
+        except (OSError, ValueError, tk.TclError):
+            return None
+
+
 class Conversation:
-    def __init__(self, key, nick: str):
-        self.key = key            # EVERYONE or (ip, port)
+    def __init__(self, key, nick: str, group=None):
+        self.key = key            # EVERYONE, (ip, port), or a group's id
+        self.group = group        # the Group, for a group channel
         self.nick = nick
         self.online = False
         self.incognito = None     # the peer's mode, None if unknown
         self.unread = 0
+        self.mentioned = False    # an unread message mentions me
         self.blocked = False
         self.items: list[dict] = []
+
+    @property
+    def is_peer(self) -> bool:
+        return isinstance(self.key, tuple)
+
+
+class GroupDialog(tk.Toplevel):
+    """result: the Group that `create(name, members)` returned, or None if
+    cancelled. `create` raises ValueError to turn a choice down."""
+
+    def __init__(self, parent, peers, create):
+        super().__init__(parent)
+        self.result = None
+        self.create = create
+        self.addrs = [addr for addr, _ in peers]
+        self.title("New group")
+        self.resizable(False, False)
+        self.transient(parent)
+        frame = ttk.Frame(self, padding=14)
+        frame.pack()
+        ttk.Label(frame, text="Group name (cannot be changed later)").pack(anchor="w")
+        self.name = ttk.Entry(frame, width=40)
+        self.name.pack(fill="x", pady=(4, 10))
+        ttk.Label(frame, text="Members (cannot be changed later)").pack(anchor="w")
+        self.members = tk.Listbox(frame, selectmode="multiple", exportselection=False,
+                                  activestyle="none", font=("Segoe UI", 10),
+                                  height=min(12, max(4, len(peers))))
+        for _, label in peers:
+            self.members.insert("end", label)
+        self.members.pack(fill="x", pady=(4, 0))
+        self.error = ttk.Label(frame, foreground="#b00020")
+        self.error.pack(anchor="w", pady=(6, 0))
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill="x", pady=(8, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(side="right")
+        ttk.Button(buttons, text="Create", command=self._ok).pack(side="right", padx=6)
+        self.bind("<Return>", lambda e: self._ok())
+        self.bind("<Escape>", lambda e: self.destroy())
+        self.name.focus_set()
+        self.grab_set()
+        self.wait_window()
+
+    def _ok(self):
+        chosen = [self.addrs[i] for i in self.members.curselection()]
+        try:
+            self.result = self.create(whole_characters(self.name.get()), chosen)
+        except ValueError as e:
+            self.error.config(text=str(e))
+            return
+        self.destroy()
 
 
 class PinDialog(tk.Toplevel):
@@ -152,6 +259,9 @@ class App:
         self.order = [EVERYONE]
         self.current = EVERYONE
         self.colors: dict = {}    # peer addr -> colour of their lines
+        self.groups = Groups()
+        self.picker_emoji = EmojiImages(24)
+        self.emoji = EmojiImages(tkfont.Font(font=("Segoe UI", 10)).metrics("linespace"))
         self.node = Node(cfg["nickname"], cfg["port"], self.events.put,
                          bind_host=cfg.get("bind", ""))
         self.node.offer_handler = self._offer_from_thread
@@ -213,6 +323,8 @@ class App:
         ttk.Button(add, text="Add IP", width=7, command=self._add_peer).pack(side="left", padx=(4, 0))
         self.listbox = tk.Listbox(left, exportselection=False, activestyle="none",
                                   font=("Segoe UI", 10), width=40)
+        ttk.Button(left, text="New group…",
+                   command=self._new_group).pack(side="bottom", fill="x", pady=(6, 0))
         self.listbox.pack(fill="both", expand=True, pady=(6, 0))
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
         body.add(left, weight=1)
@@ -257,6 +369,10 @@ class App:
         for color in (ME_COLOR, *PEER_COLORS):
             self.chat.tag_config(color, foreground=color)
         self.chat.tag_config("name", font=("Segoe UI", 10, "bold"))
+        self.chat.tag_config(MENTION, font=("Segoe UI", 10, "bold"),
+                             background=MENTION_BG)
+        self.chat.tag_config(MENTION_ME, font=("Segoe UI", 10, "bold"),
+                             background=MENTION_ME_BG)
         self.chat.tag_config("fail", foreground="#b00020")
         self.chat.tag_config("link", foreground="#1a5fb4", underline=True)
         body.add(right, weight=3)
@@ -277,6 +393,8 @@ class App:
     def _label(self, conv: Conversation) -> str:
         if conv.key == EVERYONE:
             text = "Everyone on this subnet"
+        elif conv.group:
+            text = f"# {conv.nick}"
         else:
             ip, port = conv.key
             where = ip if port == self.cfg["port"] else f"{ip}:{port}"
@@ -287,7 +405,7 @@ class App:
             if conv.blocked:
                 text += "  [blocked]"
         if conv.unread:
-            text += f"  ({conv.unread})"
+            text += f"  (@ {conv.unread})" if conv.mentioned else f"  ({conv.unread})"
         return text
 
     def _render_list(self):
@@ -302,6 +420,11 @@ class App:
             self.title_label.config(text="Everyone (not encrypted on the wire)")
             self.block_btn.state(["disabled"])
             self.file_btn.state(["disabled"])
+        elif conv.group:
+            who = ", ".join(self._name(m) for m in conv.group.members)
+            self.title_label.config(text=f"# {conv.nick}  —  you, {who}")
+            self.block_btn.state(["disabled"])
+            self.file_btn.state(["disabled"])
         else:
             self.title_label.config(text=f"{conv.nick}  —  {conv.key[0]}")
             self.block_btn.state(["!disabled"])
@@ -313,20 +436,50 @@ class App:
         for tag in chat.tag_names():
             if tag.startswith("retry-"):
                 chat.tag_delete(tag)
+        names = self._mentionable(conv)
         for index, item in enumerate(conv.items):
-            self._render_item(conv, index, item)
+            self._render_item(conv, index, item, names)
         chat.config(state="disabled")
         chat.see("end")
         self._render_counter()
 
-    def _render_item(self, conv: Conversation, index: int, item: dict):
+    def _mentionable(self, conv: Conversation) -> list[str]:
+        """The names an @ picks out in this conversation."""
+        if conv.group:
+            return [self._name(m) for m in conv.group.members]
+        if conv.key == EVERYONE:
+            return [c.nick for c in self.convs.values() if c.is_peer]
+        return []
+
+    def _insert(self, text: str, tags, names=None):
+        """Message text into the chat: emoji as colour pictures and, where
+        `names` are given, @mentions of them (and of me) highlighted."""
+        chat = self.chat
+        cut = ([(text, None)] if names is None
+               else mentions(text, names, self.cfg["nickname"]))
+        for piece, kind in cut:
+            piece_tags = (*tags, kind) if kind else tags
+            for part, emoji in emoji_pieces(piece):
+                image = self.emoji.get(emoji) if emoji else None
+                if image is None:
+                    chat.insert("end", part, piece_tags)
+                else:
+                    at = chat.index("end-1c")
+                    chat.image_create(at, image=image, align="center", padx=1)
+                    for tag in piece_tags:    # a mention keeps its background
+                        chat.tag_add(tag, at)
+
+    def _render_item(self, conv: Conversation, index: int, item: dict, names=None):
         chat = self.chat
         stamp = time.strftime("%H:%M", time.localtime(item["ts"]))
-        color = ME_COLOR if item["out"] else speaker_color(self.colors, item["who"])
         chat.insert("end", f"[{stamp}] ", ("meta", "gap"))
-        chat.insert("end", ("me" if item["out"] else item["nick"]) + ": ", (color, "name"))
+        if item["kind"] == "note":
+            self._insert(item["text"] + "\n", ("meta",))
+            return
+        color = ME_COLOR if item["out"] else speaker_color(self.colors, item["who"])
+        self._insert(("me" if item["out"] else item["nick"]) + ": ", (color, "name"))
         if item["kind"] == "msg":
-            chat.insert("end", item["text"], color)
+            self._insert(item["text"], (color,), names)
         else:
             chat.insert("end", f"[file] {item['name']} ({human_size(item['size'])})", color)
             if not item["out"]:
@@ -338,7 +491,10 @@ class App:
         elif status == "declined":
             chat.insert("end", "  ✗ declined", "fail")
         elif status == "failed":
-            chat.insert("end", f"  ✗ not delivered ({item.get('error', 'error')})  ", "fail")
+            error = item.get("error", "error")
+            # A group message says who it missed; the rest have it.
+            chat.insert("end", f"  ✗ {error}  " if item.get("missed")
+                        else f"  ✗ not delivered ({error})  ", "fail")
             tag = f"retry-{index}"
             chat.insert("end", "retry", ("link", tag))
             chat.tag_bind(tag, "<Button-1>", lambda e, c=conv, i=item: self._retry(c, i))
@@ -377,11 +533,20 @@ class App:
         conv.items.append(item)
         return item
 
-    def _incoming(self, conv: Conversation):
+    def _name(self, addr) -> str:
+        conv = self.convs.get(addr)
+        return conv.nick if conv else addr[0]
+
+    def _incoming(self, conv: Conversation, mention_by: str | None = None):
+        """`mention_by`: who mentioned me in the message that just arrived."""
         focused = self.root.focus_displayof() is not None
         if conv.key != self.current or not focused:
             if conv.key != self.current:
                 conv.unread += 1
+                conv.mentioned = conv.mentioned or mention_by is not None
+            if mention_by is not None:
+                self._set_status(f"{mention_by} mentioned you in {conv.nick}")
+                self.root.bell()
             self._flash()
         self._render_list()
         if conv.key == self.current:
@@ -410,6 +575,7 @@ class App:
             return
         self.current = self.order[selection[0]]
         self.convs[self.current].unread = 0
+        self.convs[self.current].mentioned = False
         self._render_list()
         self._render_chat()
 
@@ -430,9 +596,60 @@ class App:
         self._render_chat()
         self.input.focus_set()
 
+    def _group_conv(self, group) -> Conversation:
+        conv = self.convs.get(group.gid)
+        if conv is None:
+            conv = self.convs[group.gid] = Conversation(group.gid, group.name, group)
+            self.order.append(group.gid)
+        return conv
+
+    def _new_group(self):
+        peers = [(c.key, self._label(c)) for c in self.convs.values()
+                 if c.is_peer and not c.blocked]
+        if not peers:
+            self._set_status("Nobody to make a group with yet")
+            return
+        group = GroupDialog(self.root, peers, self.groups.create).result
+        if group is None:
+            return
+        conv = self._group_conv(group)
+        who = ", ".join(self._name(m) for m in group.members)
+        self._add_item(conv, kind="note", text=f"You created this group with {who}.")
+        self.current = conv.key
+        self._render_list()
+        self._render_chat()
+        self.input.focus_set()
+
+        def work():
+            missed = self._to_group(group, "", group.members)
+            if missed:
+                self.events.put({"type": "invited", "conv": conv, "missed": missed})
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _to_group(self, group, text: str, members) -> list:
+        """Send each of `members` their copy, all at once so one unreachable
+        member does not hold up the rest. Returns the members whose copy did
+        not arrive. Runs on a worker thread."""
+        missed = []
+
+        def send(member):
+            try:
+                self.node.send_group(member, group.gid, group.name,
+                                     [m for m in group.members if m != member], text)
+            except (DeliveryError, OSError):
+                missed.append(member)
+
+        threads = [threading.Thread(target=send, args=(m,), daemon=True) for m in members]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return [m for m in members if m in missed]
+
     def _toggle_block(self):
         conv = self.convs[self.current]
-        if conv.key == EVERYONE:
+        if not conv.is_peer:
             return
         conv.blocked = not conv.blocked
         (self.node.block if conv.blocked else self.node.unblock)(conv.key[0])
@@ -509,8 +726,10 @@ class App:
         win.protocol("WM_DELETE_WINDOW", self._close_emoji)
         win.bind("<Escape>", lambda e: self._close_emoji())
         for n, emoji in enumerate(EMOJI):
-            tk.Button(win, text=emoji, font=("Segoe UI Emoji", 13), width=2,
-                      relief="flat", takefocus=False,
+            image = self.picker_emoji.get(emoji)
+            look = ({"image": image, "padx": 4, "pady": 4} if image else
+                    {"text": emoji, "font": ("Segoe UI Emoji", 13), "width": 2})
+            tk.Button(win, relief="flat", takefocus=False, **look,
                       command=lambda e=emoji: self._insert_emoji(e)).grid(
                 row=n // EMOJI_COLUMNS, column=n % EMOJI_COLUMNS)
         # Above the input box, so it covers the chat rather than what is being typed.
@@ -548,24 +767,30 @@ class App:
 
     def _dispatch(self, conv: Conversation, item: dict):
         item["status"] = "sending"
+        # A retry goes only to the group members the message has not reached.
+        targets = item.get("missed") or (conv.group and conv.group.members)
         self._render_chat()
 
         def work():
-            error = None
+            error, reached, missed = None, True, []
             try:
-                if conv.key == EVERYONE:
+                if conv.group:
+                    missed = self._to_group(conv.group, item["text"], targets)
+                    reached = len(missed) < len(targets)
+                elif conv.key == EVERYONE:
                     self.node.send_broadcast(item["text"])
                 else:
                     self.node.send_message(conv.key, item["text"])
             except (DeliveryError, OSError) as e:
-                error = str(e) or "error"
-            self.events.put({"type": "sent", "conv": conv, "item": item, "error": error})
+                error, reached = str(e) or "error", False
+            self.events.put({"type": "sent", "conv": conv, "item": item,
+                             "error": error, "reached": reached, "missed": missed})
 
         threading.Thread(target=work, daemon=True).start()
 
     def _send_files(self):
         conv = self.convs[self.current]
-        if conv.key == EVERYONE:
+        if not conv.is_peer:
             return
         paths = filedialog.askopenfilenames(parent=self.root, title="Send file")
         if not paths:
@@ -627,7 +852,8 @@ class App:
             conv.online = ev["online"]
             conv.incognito = ev["incognito"]
             self._render_list()
-            if conv.key == self.current:
+            # A group's title and mentions show its members' names.
+            if conv.key == self.current or self.convs[self.current].group:
                 self._render_chat()
         elif kind in ("message", "broadcast"):
             sender = self._conv(ev["addr"], ev["nick"])
@@ -636,14 +862,49 @@ class App:
                            text=ev["text"])
             self.session.record(kind=kind, dir="in", peer=ev["addr"][0],
                                 nick=ev["nick"], text=ev["text"])
-            self._incoming(conv)
+            mine = kind == "broadcast" and mentions_me(ev["text"], self.cfg["nickname"])
+            self._incoming(conv, ev["nick"] if mine else None)
+        elif kind == "group":
+            self._conv(ev["addr"], ev["nick"])
+            new = self.groups.get(ev["gid"]) is None
+            group = self.groups.receive(ev["gid"], ev["name"], ev["members"])
+            if group is None:
+                return
+            conv = self._group_conv(group)
+            if new:
+                self._add_item(conv, kind="note",
+                               text=f"{ev['nick']} added you to this group.")
+            if ev["text"]:
+                self._add_item(conv, kind="msg", out=False, nick=ev["nick"],
+                               who=ev["addr"], text=ev["text"])
+                self.session.record(kind="group", dir="in", peer=ev["addr"][0],
+                                    nick=ev["nick"], group=group.name, text=ev["text"])
+            if new or ev["text"]:
+                mine = mentions_me(ev["text"], self.cfg["nickname"])
+                self._incoming(conv, ev["nick"] if mine else None)
+        elif kind == "invited":
+            who = ", ".join(self._name(m) for m in ev["missed"])
+            self._add_item(ev["conv"], kind="note",
+                           text=f"Could not reach {who}. They join the group when "
+                                "a message gets through to them.")
+            if ev["conv"].key == self.current:
+                self._render_chat()
         elif kind == "sent":
             conv, item = ev["conv"], ev["item"]
+            item["missed"] = ev["missed"]
+            if ev["missed"]:
+                ev["error"] = "not delivered to " + ", ".join(map(self._name, ev["missed"]))
             item["status"], item["error"] = ("failed", ev["error"]) if ev["error"] else ("ok", None)
-            if not ev["error"]:
-                self.session.record(
-                    kind="broadcast" if conv.key == EVERYONE else "message", dir="out",
-                    peer=None if conv.key == EVERYONE else conv.key[0], text=item["text"])
+            # A group message that reached only some members was still sent.
+            if ev["reached"] and not item.get("recorded"):
+                item["recorded"] = True
+                if conv.group:
+                    self.session.record(kind="group", dir="out", group=conv.group.name,
+                                        text=item["text"])
+                else:
+                    self.session.record(
+                        kind="broadcast" if conv.key == EVERYONE else "message", dir="out",
+                        peer=conv.key[0] if conv.is_peer else None, text=item["text"])
             if conv.key == self.current:
                 self._render_chat()
         elif kind == "offer":

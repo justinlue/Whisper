@@ -8,12 +8,15 @@ Events (all carry "type"):
     peer           addr, nick, incognito, online
     message        addr, nick, text
     broadcast      addr, nick, text
+    group          addr, nick, gid, name, members, text   (text "" = invitation)
     file_progress  addr, name, done, size
     file_received  addr, nick, name, size, path
     file_failed    addr, name, error
     incompatible   ip
 """
+import ipaddress
 import os
+import re
 import socket
 import sys
 import threading
@@ -22,6 +25,7 @@ from pathlib import Path
 
 from .config import DEFAULT_PORT, MAX_NICK
 from .files import PART_SUFFIX, sanitize_filename, unique_path
+from .groups import MAX_GROUP_MEMBERS, MAX_GROUP_NAME
 from .paths import files_dir
 from .wire import (KIND_CHUNK, IncompatibleVersion, ProtocolError, decode_datagram,
                    encode_datagram, handshake)
@@ -65,6 +69,31 @@ def _port_of(msg: dict) -> int:
 def _nick_of(msg: dict, ip: str) -> str:
     nick = msg.get("nick")
     return nick.strip()[:MAX_NICK] if isinstance(nick, str) and nick.strip() else ip
+
+
+def _group_of(msg: dict):
+    """(gid, name, other members) of a group message, or None if malformed."""
+    gid, name, others = msg.get("gid"), msg.get("name"), msg.get("others")
+    if not isinstance(gid, str) or not re.fullmatch(r"[0-9a-f]{16}", gid):
+        return None
+    if not isinstance(name, str) or not name.strip() or len(name) > MAX_GROUP_NAME:
+        return None
+    if not isinstance(others, list) or len(others) > MAX_GROUP_MEMBERS - 2:
+        return None
+    members = []
+    for entry in others:
+        if not isinstance(entry, list) or len(entry) != 2:
+            return None
+        ip, port = entry
+        if not isinstance(ip, str) or type(port) is not int or not 1 <= port <= 65535:
+            return None
+        try:
+            members.append((str(ipaddress.IPv4Address(ip)), port))
+        except ValueError:
+            return None
+    if len(set(members)) != len(members):
+        return None
+    return gid, name.strip(), members
 
 
 class Node:
@@ -152,17 +181,17 @@ class Node:
             self._blocked.discard(ip)
 
     def send_message(self, addr: tuple[str, int], text: str) -> None:
-        if len(text.encode()) > MAX_TEXT:
-            raise DeliveryError("message too long")
-        ch = self._connect(addr)
-        try:
-            ch.send_json({"t": "msg", "text": text, **self._ident()})
-            if ch.recv_json().get("t") != "ack":
-                raise DeliveryError("peer refused the message")
-        except (OSError, ProtocolError) as e:
-            raise DeliveryError(str(e) or "connection lost") from None
-        finally:
-            ch.close()
+        self._deliver(addr, {"t": "msg", "text": text})
+
+    def send_group(self, addr: tuple[str, int], gid: str, name: str, others,
+                   text: str = "") -> None:
+        """One member's copy of a group message. `others` are the members
+        besides us and `addr`; every copy describes the group, so a member who
+        missed the invitation learns of it from the first message. Without
+        text this is the invitation itself."""
+        self._deliver(addr, {"t": "group", "gid": gid, "name": name,
+                             "others": [list(member) for member in others],
+                             "text": text})
 
     def send_broadcast(self, text: str) -> None:
         if len(text.encode()) > MAX_BROADCAST:
@@ -205,6 +234,19 @@ class Node:
 
     def _ident(self) -> dict:
         return {"nick": self.nick, "port": self.port, "incognito": self.incognito}
+
+    def _deliver(self, addr: tuple[str, int], body: dict) -> None:
+        if len(body["text"].encode()) > MAX_TEXT:
+            raise DeliveryError("message too long")
+        ch = self._connect(addr)
+        try:
+            ch.send_json({**body, **self._ident()})
+            if ch.recv_json().get("t") != "ack":
+                raise DeliveryError("peer refused the message")
+        except (OSError, ProtocolError) as e:
+            raise DeliveryError(str(e) or "connection lost") from None
+        finally:
+            ch.close()
 
     def _emit(self, type_: str, **fields) -> None:
         try:
@@ -375,6 +417,14 @@ class Node:
                 text = msg.get("text")
                 if isinstance(text, str) and text and len(text.encode()) <= MAX_TEXT:
                     self._emit("message", addr=addr, nick=nick, text=text)
+                    ch.send_json({"t": "ack"})
+            elif msg.get("t") == "group":
+                group, text = _group_of(msg), msg.get("text")
+                if (group and isinstance(text, str) and len(text.encode()) <= MAX_TEXT
+                        and addr not in group[2]):
+                    gid, name, others = group
+                    self._emit("group", addr=addr, nick=nick, gid=gid, name=name,
+                               members=[addr, *others], text=text)
                     ch.send_json({"t": "ack"})
             elif msg.get("t") == "file":
                 self._receive_file(ch, addr, nick, msg)

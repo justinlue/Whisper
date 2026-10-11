@@ -31,6 +31,17 @@ Whisper can run per computer; a second launch reports that the port is taken.
   non-default port).
 - **Everyone** sends one message to every Whisper on the subnet. It does not
   cross routers or VLANs, is limited to 1000 bytes, and is **not encrypted**.
+- **New group…** makes a group channel: give it a name and tick the people
+  in it. Both are fixed from then on; nobody can rename the group or change
+  who is in it. Each message goes to every member separately, encrypted like
+  a one-to-one message. A message that missed someone says who, and `retry`
+  sends it to them alone. Groups last until you close Whisper; if you come
+  back, the next message from any member puts you in the group again.
+- **@name** in a group or in Everyone highlights that person's name. Being
+  mentioned yourself is highlighted more strongly, and if you are not looking
+  at that conversation Whisper beeps, flashes its taskbar button, says who
+  mentioned you in the status bar, and marks the conversation `(@ 2)`. Type
+  the name as it is shown; capitals do not matter.
 - **Send file…** works in a one-to-one conversation. The recipient is asked to
   accept each file. Your original is read in place; nothing is copied locally.
 - A message that could not be delivered is marked `✗ not delivered` with a
@@ -39,8 +50,13 @@ Whisper can run per computer; a second launch reports that the port is taken.
 - Enter sends, Shift+Enter starts a new line.
 - **Emoji** work in messages and names: the *Emoji* button opens a picker that
   stays open until you close it or press Esc; `Win` + `.` (the Windows emoji
-  panel) and paste work too. They are drawn in one colour, and combined emoji (flags,
-  families, skin tones) may show as their separate parts.
+  panel) and paste work too. In the chat and the picker they are drawn in
+  colour (this needs Pillow, from `requirements.txt`, and Windows' Segoe UI
+  Emoji font; without them they are drawn in one colour). The box you type in
+  and the list on the left still show them in one colour, and text copied
+  out of the chat leaves the colour emoji behind. Combined emoji lose
+  their combination: a skin-toned emoji is drawn in the default yellow, a
+  family as its separate people, and a flag as its two letters.
 
 ## Incognito mode
 
@@ -74,6 +90,9 @@ Things incognito does **not** do:
   per connection, AES-256-GCM). This stops someone sniffing the LAN. Peers are
   not authenticated, so it does not stop an active man-in-the-middle, and
   nicknames can be faked: trust the IP shown beside the name.
+- Group messages travel the same encrypted way, one connection per member.
+  A group is whatever its first message said it was: anyone can put you in a
+  group, as anyone can message you, and only its members can speak in it.
 - Presence and the Everyone channel are plaintext.
 - The history file is AES-256-GCM under a key derived from the PIN with
   Argon2id (256 MiB). A numeric PIN is short: this keeps out someone browsing

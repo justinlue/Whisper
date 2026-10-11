@@ -206,3 +206,39 @@ def test_half_an_emoji_from_a_peer_never_reaches_the_ui(pair):
     wait_for(lambda: any(e["text"] == "after" for e in of_type(pair.eb, "broadcast")))
     for event in pair.eb:
         json.dumps(event, ensure_ascii=False).encode()
+
+
+GID = "0123456789abcdef"
+
+
+def test_group_message_is_delivered_with_the_group_it_belongs_to(pair):
+    carol = ("127.0.0.9", 48765)
+    pair.a.send_group(pair.addr_b, GID, "Lunch crew", [carol], "noodles? 🍜")
+    msg = wait_for(lambda: of_type(pair.eb, "group"))[0]
+    assert msg["gid"] == GID and msg["name"] == "Lunch crew"
+    assert msg["text"] == "noodles? 🍜"
+    assert msg["nick"] == "alice" and msg["addr"] == pair.addr_a
+    assert msg["members"] == [pair.addr_a, carol]
+
+
+def test_group_invitation_carries_no_text(pair):
+    pair.a.send_group(pair.addr_b, GID, "Lunch crew", [])
+    invite = wait_for(lambda: of_type(pair.eb, "group"))[0]
+    assert invite["text"] == "" and invite["members"] == [pair.addr_a]
+
+
+@pytest.mark.parametrize("gid, name, others", [
+    ("not-a-gid", "Lunch crew", []),
+    (GID, "   ", []),
+    (GID, "x" * 41, []),
+    (GID, "Lunch crew", [["not an ip", 48765]]),
+    (GID, "Lunch crew", [["10.0.0.3", 0]]),
+    (GID, "Lunch crew", [["10.0.0.3"]]),
+    (GID, "Lunch crew", [["10.0.0.%d" % n, 48765] for n in range(40)]),
+    (GID, "Lunch crew", "everyone"),
+    (GID, "Lunch crew", [["10.0.0.3", 48765], ["10.0.0.3", 48765]]),
+])
+def test_malformed_group_message_is_refused(pair, gid, name, others):
+    with pytest.raises(DeliveryError):
+        pair.a.send_group(pair.addr_b, gid, name, others, "hi")
+    assert not of_type(pair.eb, "group")
