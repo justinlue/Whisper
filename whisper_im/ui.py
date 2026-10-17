@@ -814,7 +814,13 @@ class App:
         self._dispatch(conv, item)
 
     def _retry(self, conv: Conversation, item: dict):
-        if item.get("status") == "failed":
+        if item.get("status") != "failed":
+            return
+        if item["kind"] == "file":
+            item["status"] = "sending"
+            self._render_chat()
+            self._transfer(conv, [item])
+        else:
             self._dispatch(conv, item)
 
     def _dispatch(self, conv: Conversation, item: dict):
@@ -883,7 +889,7 @@ class App:
     def _send_jobs(self, conv: Conversation, sources):
         """Send each source to the peer: a path, read in place, or
         (name, bytes) for a picture that exists only in memory."""
-        jobs = []
+        items = []
         for source in sources:
             if isinstance(source, tuple):
                 (name, content), size = source, len(source[1])
@@ -893,14 +899,19 @@ class App:
                 except OSError:
                     continue
                 name, content = os.path.basename(source), source
-            item = self._add_item(conv, kind="file", out=True, nick="me",
-                                  name=name, size=size, status="sending")
+            # The source stays on the item so that `retry` can send it again.
+            item = self._add_item(conv, kind="file", out=True, nick="me", name=name,
+                                  size=size, status="sending", source=source)
             self._attach_picture(conv, item, content)
-            jobs.append((source, item))
+            items.append(item)
         self._render_chat()
+        self._transfer(conv, items)
 
+    def _transfer(self, conv: Conversation, items):
+        """Send the outgoing file items one after another on a worker thread."""
         def work():
-            for source, item in jobs:
+            for item in items:
+                source = item["source"]
                 def progress(done, size, name=item["name"]):
                     self.events.put({"type": "send_progress", "name": name,
                                      "done": done, "size": size})
