@@ -44,6 +44,15 @@ Whisper can run per computer; a second launch reports that the port is taken.
   the name as it is shown; capitals do not matter.
 - **Send file…** works in a one-to-one conversation. The recipient is asked to
   accept each file. Your original is read in place; nothing is copied locally.
+- **Pictures**: in a one-to-one conversation, `Ctrl` + `V` in the box you type
+  in sends the picture on the clipboard: a screenshot or a picture copied
+  from a browser is sent as a `.png` (made in memory; nothing is saved on
+  your side), and `.png`, `.jpg` or `.jpeg` files copied in Explorer are sent
+  from where they are. Only PNG and JPEG are sent; any other copied file is
+  listed as not sent. If the clipboard holds text as well as a picture (as
+  Excel and Word do), the text is pasted. The recipient accepts a picture
+  like any file. PNG and JPEG pictures, sent or received, are shown in the
+  chat; right-click one and choose *Copy image* to put it on the clipboard.
 - A message that could not be delivered is marked `✗ not delivered` with a
   `retry` link. Nothing is queued.
 - **Block** drops everything from that IP until you close Whisper.

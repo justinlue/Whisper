@@ -130,6 +130,21 @@ def test_file_transfer_accepted(pair, tmp_path):
     assert src.read_bytes() == data
 
 
+def test_pasted_picture_is_sent_from_memory_as_a_file(pair, whisper_home):
+    data = os.urandom(200_000)
+    offers = []
+    pair.b.offer_handler = lambda offer: offers.append(offer) or True
+    progress = []
+    pair.a.send_bytes(pair.addr_b, "pasted.png", data,
+                      progress=lambda done, size: progress.append(done))
+    wait_for(lambda: of_type(pair.eb, "file_received"))
+    assert offers[0]["name"] == "pasted.png" and offers[0]["size"] == len(data)
+    assert (pair.inbox / "pasted.png").read_bytes() == data
+    assert progress[-1] == len(data)
+    # Nothing but the receiver's inbox was written: the sender kept it in memory.
+    assert [p for p in whisper_home.rglob("*") if p.is_file()] == [pair.inbox / "pasted.png"]
+
+
 def test_second_copy_is_renamed_not_overwritten(pair, tmp_path):
     src = tmp_path / "note.txt"
     pair.b.offer_handler = lambda offer: True

@@ -21,6 +21,7 @@ Tests set `WHISPER_HOME` to a temp dir and `WHISPER_ARGON2_TIME/MEM` low (see `t
 - `files.py` — peer-supplied filename sanitising, collision naming, incognito wipe, startup sweep.
 - `wire.py` — TCP handshake + encrypted `Channel`, UDP datagram encoding. Protocol version lives here.
 - `groups.py` — group channels: name and members fixed at creation; decides whether an incoming group message is accepted.
+- `images.py` — pictures (PNG/JPEG only): what a paste sends, thumbnails of untrusted files, CF_DIB bytes for copying out. Pillow, optional at runtime.
 - `markup.py` — pure text cutting: @mentions and emoji pieces.
 - `net.py` — `Node`: threads for accept, UDP receive, presence. Reports via `on_event(dict)` **from network threads**.
 - `ui.py` — tkinter. Drains a queue of node events on a timer; never touch widgets from a `Node` callback.
@@ -31,7 +32,7 @@ Tests set `WHISPER_HOME` to a temp dir and `WHISPER_ARGON2_TIME/MEM` low (see `t
 - The mode in force when an event happens decides its fate; toggling never retroactively records or deletes.
 - A file is written as `name.part` and renamed when complete, so `sweep()` can identify half-received files.
 - `sweep()` runs only after the node has bound its port, so a refused second instance cannot delete the first one's files.
-- Anything arriving from the network is untrusted: validate types and lengths in `net.py`, and pass filenames through `sanitize_filename`.
+- Anything arriving from the network is untrusted: validate types and lengths in `net.py`, and pass filenames through `sanitize_filename`. A received file's contents are decoded only by `images.py` (format check, pixel cap), off the Tk thread.
 - Groups are never persisted and have no coordinator: every group message carries the group's id, name and members, and a member keeps what it saw first.
 - Tk 8.6 draws emoji in one colour and counts one as two characters. Colour emoji are Pillow-rendered images (`EmojiImages` in `ui.py`), optional at runtime; build chat text from pieces rather than computing Text indices.
 - A wire-format change needs a `VERSION` bump in `wire.py`; a history-format change needs a `FORMAT` bump in `history.py`.

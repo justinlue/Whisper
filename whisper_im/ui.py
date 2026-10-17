@@ -18,6 +18,7 @@ from .crypto import MIN_PIN_LEN, validate_pin
 from .files import incognito_files
 from .groups import Groups
 from .history import WrongPin
+from .images import dib, from_clipboard, is_image_file, thumbnail
 from .markup import MENTION, MENTION_ME, emoji_pieces, mentions, mentions_me
 from .net import MAX_BROADCAST, MAX_TEXT, Declined, DeliveryError, Node
 from .paths import files_dir, incognito_dir
@@ -45,6 +46,9 @@ EMOJI = tuple(
     "☕🍺🍜🍕🍰🌙🌞🌧⭐⚡"
     "✅❌❓❗⏰📅📞💻🚀👀")
 EMOJI_COLUMNS = 10
+PICTURE_SIDE = 240        # longest side of a picture drawn in the chat
+CF_DIB = 8                # Win32 clipboard format: a BMP without its file header
+GMEM_MOVEABLE = 2         # GlobalAlloc flag the clipboard requires
 
 
 def speaker_color(assigned: dict, who) -> str:
@@ -78,6 +82,46 @@ def parse_addr(text: str, default_port: int) -> tuple[str, int]:
     if not 1 <= port <= 65535:
         raise ValueError("port out of range")
     return ip, port
+
+
+def clipboard_dib(data: bytes) -> bool:
+    """Put a picture on the Windows clipboard, given as CF_DIB bytes.
+    False if it could not be done, including on other systems."""
+    # Own copies of the DLLs, so the argtypes set here do not leak into
+    # other users of ctypes.windll.
+    try:
+        kernel32, user32 = ctypes.WinDLL("kernel32"), ctypes.WinDLL("user32")
+    except (AttributeError, OSError):
+        return False
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = (ctypes.c_uint, ctypes.c_size_t)
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = (ctypes.c_void_p,)
+    kernel32.GlobalUnlock.argtypes = (ctypes.c_void_p,)
+    kernel32.GlobalFree.argtypes = (ctypes.c_void_p,)
+    user32.OpenClipboard.argtypes = (ctypes.c_void_p,)
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    user32.SetClipboardData.argtypes = (ctypes.c_uint, ctypes.c_void_p)
+    if not user32.OpenClipboard(None):
+        return False
+    try:
+        user32.EmptyClipboard()
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not handle:
+            return False
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            kernel32.GlobalFree(handle)
+            return False
+        ctypes.memmove(pointer, data, len(data))
+        kernel32.GlobalUnlock(handle)
+        # On success the clipboard owns the memory.
+        if not user32.SetClipboardData(CF_DIB, handle):
+            kernel32.GlobalFree(handle)
+            return False
+        return True
+    finally:
+        user32.CloseClipboard()
 
 
 class EmojiImages:
@@ -353,6 +397,7 @@ class App:
         # Picking an emoji hands focus back here, so Escape must work from here too.
         self.input.bind("<Escape>", lambda e: self.emoji_win and self._close_emoji())
         self.input.bind("<KeyRelease>", lambda e: self._render_counter())
+        self.input.bind("<<Paste>>", self._on_paste)
 
         chat = ttk.Frame(right)
         chat.pack(fill="both", expand=True, pady=(6, 0))
@@ -434,7 +479,7 @@ class App:
         chat.config(state="normal")
         chat.delete("1.0", "end")
         for tag in chat.tag_names():
-            if tag.startswith("retry-"):
+            if tag.startswith(("retry-", "picture-")):
                 chat.tag_delete(tag)
         names = self._mentionable(conv)
         for index, item in enumerate(conv.items):
@@ -502,6 +547,13 @@ class App:
             chat.tag_bind(tag, "<Leave>", lambda e: chat.config(cursor=""))
         elif status == "ok" and item["kind"] == "file" and item["out"]:
             chat.insert("end", "  ✓ sent", "meta")
+        if item.get("thumb"):
+            chat.insert("end", "\n")
+            at = chat.index("end-1c")
+            chat.image_create(at, image=item["thumb"], padx=16, pady=4)
+            tag = f"picture-{index}"
+            chat.tag_add(tag, at)
+            chat.tag_bind(tag, "<Button-3>", lambda e, i=item: self._picture_menu(e, i))
         chat.insert("end", "\n")
 
     def _render_counter(self):
@@ -788,32 +840,76 @@ class App:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _on_paste(self, event=None):
+        """A picture on the clipboard is sent; anything else pastes as text."""
+        try:
+            from PIL import ImageGrab
+            content = ImageGrab.grabclipboard()
+        except Exception:         # no Pillow, or a clipboard it cannot read
+            return None
+        # Copied files win over text; text wins over a bitmap, which programs
+        # such as Excel put beside the text they copy.
+        if content is None or (not isinstance(content, list) and self._clipboard_text()):
+            return None
+        conv = self.convs[self.current]
+        if not conv.is_peer:
+            self._set_status("Pictures can be sent only in a one-to-one conversation")
+            return "break"
+        sources, rejected = from_clipboard(content, time.time())
+        if rejected:
+            self._add_item(conv, kind="note",
+                           text="Not sent, only .png and .jpg pictures can be pasted: "
+                                + ", ".join(rejected))
+        if sources:
+            self._send_jobs(conv, sources)
+        else:
+            self._render_chat()
+        return "break"
+
+    def _clipboard_text(self) -> bool:
+        try:
+            return bool(self.root.clipboard_get())
+        except tk.TclError:
+            return False
+
     def _send_files(self):
         conv = self.convs[self.current]
         if not conv.is_peer:
             return
         paths = filedialog.askopenfilenames(parent=self.root, title="Send file")
-        if not paths:
-            return
+        if paths:
+            self._send_jobs(conv, paths)
+
+    def _send_jobs(self, conv: Conversation, sources):
+        """Send each source to the peer: a path, read in place, or
+        (name, bytes) for a picture that exists only in memory."""
         jobs = []
-        for p in paths:
-            try:
-                size = os.path.getsize(p)
-            except OSError:
-                continue
-            jobs.append((p, self._add_item(conv, kind="file", out=True, nick="me",
-                                           name=os.path.basename(p), size=size,
-                                           status="sending")))
+        for source in sources:
+            if isinstance(source, tuple):
+                (name, content), size = source, len(source[1])
+            else:
+                try:
+                    size = os.path.getsize(source)
+                except OSError:
+                    continue
+                name, content = os.path.basename(source), source
+            item = self._add_item(conv, kind="file", out=True, nick="me",
+                                  name=name, size=size, status="sending")
+            self._attach_picture(conv, item, content)
+            jobs.append((source, item))
         self._render_chat()
 
         def work():
-            for path, item in jobs:
+            for source, item in jobs:
                 def progress(done, size, name=item["name"]):
                     self.events.put({"type": "send_progress", "name": name,
                                      "done": done, "size": size})
                 error, status = None, "ok"
                 try:
-                    self.node.send_file(conv.key, path, progress)
+                    if isinstance(source, tuple):
+                        self.node.send_bytes(conv.key, *source, progress)
+                    else:
+                        self.node.send_file(conv.key, source, progress)
                 except Declined:
                     status = "declined"
                 except (DeliveryError, OSError) as e:
@@ -916,9 +1012,10 @@ class App:
         elif kind == "file_received":
             conv = self._conv(ev["addr"], ev["nick"])
             incognito = Path(ev["path"]).parent == incognito_dir()
-            self._add_item(conv, kind="file", out=False, nick=ev["nick"], who=ev["addr"],
-                           name=ev["name"], size=ev["size"], path=ev["path"],
-                           incognito=incognito)
+            item = self._add_item(conv, kind="file", out=False, nick=ev["nick"],
+                                  who=ev["addr"], name=ev["name"], size=ev["size"],
+                                  path=ev["path"], incognito=incognito)
+            self._attach_picture(conv, item, ev["path"])
             self.session.record(kind="file", dir="in", peer=ev["addr"][0], nick=ev["nick"],
                                 name=ev["name"], size=ev["size"], path=ev["path"])
             self._set_status(f"Received {ev['name']}")
@@ -935,6 +1032,14 @@ class App:
                               "failed": "Failed: "}[ev["status"]] + item["name"])
             if conv.key == self.current:
                 self._render_chat()
+        elif kind == "picture":
+            from PIL import ImageTk
+            ev["item"]["thumb"] = ImageTk.PhotoImage(ev["image"])
+            ev["item"]["picture"] = ev["source"]
+            if ev["conv"].key == self.current:
+                self._render_chat()
+        elif kind == "copied":
+            self._set_status(ev["text"])
         elif kind == "incompatible":
             self._set_status(f"{ev['ip']} runs an incompatible version of Whisper")
 
@@ -954,6 +1059,47 @@ class App:
             ev["reply"].put_nowait(accept)
         except queue.Full:
             pass
+
+    # ── pictures ─────────────────────────────────────────────────────────────
+
+    def _attach_picture(self, conv: Conversation, item: dict, source):
+        """If `source` (a path or bytes) is a PNG or JPEG, draw it under the
+        item and keep it for Copy image. The thumbnail lives in memory only.
+        A large picture takes a while to decode, so that happens on a worker
+        thread; the "picture" event brings the result back."""
+        if not isinstance(source, bytes) and not is_image_file(source):
+            return
+
+        def work():
+            image = thumbnail(source, PICTURE_SIDE)
+            if image is not None:
+                self.events.put({"type": "picture", "conv": conv, "item": item,
+                                 "image": image, "source": source})
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _picture_menu(self, event, item: dict):
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="Copy image", command=lambda: self._copy_picture(item))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _copy_picture(self, item: dict):
+        """Decoding at full size takes a while, so it runs on a worker thread."""
+        def work():
+            data = dib(item["picture"])
+            if data is None:
+                text = f"Cannot read {item['name']} any more"
+            elif clipboard_dib(data):
+                text = f"Copied {item['name']}"
+            else:
+                text = "Could not put the picture on the clipboard"
+            self.events.put({"type": "copied", "text": text})
+
+        self._set_status(f"Copying {item['name']}…")
+        threading.Thread(target=work, daemon=True).start()
 
     # ── misc ─────────────────────────────────────────────────────────────────
 

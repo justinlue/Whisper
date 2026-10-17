@@ -14,6 +14,7 @@ Events (all carry "type"):
     file_failed    addr, name, error
     incompatible   ip
 """
+import io
 import ipaddress
 import os
 import re
@@ -207,30 +208,39 @@ class Node:
         except OSError as e:
             raise DeliveryError(f"cannot read file: {e}") from None
         with f:
-            ch = self._connect(addr)
-            try:
-                ch.send_json({"t": "file", "name": path.name, "size": size,
-                              **self._ident()})
-                ch.sock.settimeout(OFFER_TIMEOUT)
-                if ch.recv_json().get("t") != "accept":
-                    raise Declined("declined")
-                ch.sock.settimeout(IO_TIMEOUT)
-                sent, last = 0, -1
-                while chunk := f.read(CHUNK):
-                    ch.send(KIND_CHUNK, chunk)
-                    sent += len(chunk)
-                    pct = sent * 100 // size
-                    if progress and pct != last:
-                        last = pct
-                        progress(sent, size)
-                if ch.recv_json().get("t") != "ack":
-                    raise DeliveryError("peer did not confirm the file")
-            except (OSError, ProtocolError) as e:
-                raise DeliveryError(str(e) or "connection lost") from None
-            finally:
-                ch.close()
+            self._send_stream(addr, path.name, size, f, progress)
+
+    def send_bytes(self, addr: tuple[str, int], name: str, data: bytes,
+                   progress=None) -> None:
+        """Send `data` as a file called `name`, such as a pasted picture that
+        exists only in memory. The peer sees an ordinary file."""
+        self._send_stream(addr, name, len(data), io.BytesIO(data), progress)
 
     # ── internals ────────────────────────────────────────────────────────────
+
+    def _send_stream(self, addr, name: str, size: int, f, progress) -> None:
+        ch = self._connect(addr)
+        try:
+            ch.send_json({"t": "file", "name": name, "size": size,
+                          **self._ident()})
+            ch.sock.settimeout(OFFER_TIMEOUT)
+            if ch.recv_json().get("t") != "accept":
+                raise Declined("declined")
+            ch.sock.settimeout(IO_TIMEOUT)
+            sent, last = 0, -1
+            while chunk := f.read(CHUNK):
+                ch.send(KIND_CHUNK, chunk)
+                sent += len(chunk)
+                pct = sent * 100 // size
+                if progress and pct != last:
+                    last = pct
+                    progress(sent, size)
+            if ch.recv_json().get("t") != "ack":
+                raise DeliveryError("peer did not confirm the file")
+        except (OSError, ProtocolError) as e:
+            raise DeliveryError(str(e) or "connection lost") from None
+        finally:
+            ch.close()
 
     def _ident(self) -> dict:
         return {"nick": self.nick, "port": self.port, "incognito": self.incognito}
