@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from whisper_im.net import MAX_BROADCAST, Declined, DeliveryError, Node
-from whisper_im.wire import encode_datagram
+from whisper_im.net import MAX_BROADCAST, MAX_GROUP_PICTURE, Declined, DeliveryError, Node
+from whisper_im.wire import MAGIC, VERSION, encode_datagram
 
 HOST = "127.0.0.1"
 
@@ -213,9 +213,9 @@ def test_emoji_nickname_and_broadcast_arrive_whole(pair):
 
 def test_half_an_emoji_from_a_peer_never_reaches_the_ui(pair):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.sendto(b"WSPR\x01" + rb'{"t": "msg", "text": "\ud83d", "iid": "x"}',
+        s.sendto(MAGIC + bytes([VERSION]) + rb'{"t": "msg", "text": "\ud83d", "iid": "x"}',
                  pair.addr_b)
-        s.sendto(b"WSPR\x01" + rb'{"t": "hello", "nick": "\ude00", "iid": "x"}',
+        s.sendto(MAGIC + bytes([VERSION]) + rb'{"t": "hello", "nick": "\ude00", "iid": "x"}',
                  pair.addr_b)
         s.sendto(encode_datagram({"t": "msg", "text": "after", "iid": "x"}), pair.addr_b)
     wait_for(lambda: any(e["text"] == "after" for e in of_type(pair.eb, "broadcast")))
@@ -257,3 +257,66 @@ def test_malformed_group_message_is_refused(pair, gid, name, others):
     with pytest.raises(DeliveryError):
         pair.a.send_group(pair.addr_b, gid, name, others, "hi")
     assert not of_type(pair.eb, "group")
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + os.urandom(100_000)
+
+
+def test_private_file_offer_belongs_to_no_group(pair):
+    offers = []
+    pair.b.offer_handler = lambda offer: offers.append(offer) or True
+    pair.a.send_bytes(pair.addr_b, "shot.png", PNG)
+    got = wait_for(lambda: of_type(pair.eb, "file_received"))[0]
+    assert offers[0]["group"] is None and got["gid"] is None
+
+
+def test_group_picture_arrives_with_the_group_it_belongs_to(pair):
+    carol = ("127.0.0.9", 48765)
+    offers = []
+    pair.b.offer_handler = lambda offer: offers.append(offer) or True
+    pair.a.send_bytes(pair.addr_b, "shot.png", PNG, group=(GID, "Lunch crew", [carol]))
+    got = wait_for(lambda: of_type(pair.eb, "file_received"))[0]
+    assert offers[0]["group"] == (GID, "Lunch crew", [pair.addr_a, carol])
+    assert got["gid"] == GID
+    assert (pair.inbox / "shot.png").read_bytes() == PNG
+
+
+def test_group_picture_can_be_sent_from_a_file(pair, tmp_path):
+    src = tmp_path / "photo.JPG"
+    src.write_bytes(b"\xff\xd8\xff" + os.urandom(1000))
+    pair.b.offer_handler = lambda offer: True
+    pair.a.send_file(pair.addr_b, src, group=(GID, "Lunch crew", []))
+    got = wait_for(lambda: of_type(pair.eb, "file_received"))[0]
+    assert got["gid"] == GID and (pair.inbox / "photo.JPG").exists()
+
+
+@pytest.mark.parametrize("name, size", [
+    ("notes.txt", 1000),
+    ("shot.png", 0),
+    ("shot.png", MAX_GROUP_PICTURE + 1),
+], ids=["not-a-picture", "empty", "too-big"])
+def test_group_file_that_cannot_be_a_picture_is_declined_unasked(pair, name, size):
+    data = PNG[:8] + bytes(size - 8) if size else b""
+    offers = []
+    pair.b.offer_handler = lambda offer: offers.append(offer) or True
+    with pytest.raises(Declined):
+        pair.a.send_bytes(pair.addr_b, name, data, group=(GID, "Lunch crew", []))
+    assert not offers and not pair.inbox.exists()
+
+
+def test_group_offer_with_a_malformed_group_is_declined_unasked(pair):
+    offers = []
+    pair.b.offer_handler = lambda offer: offers.append(offer) or True
+    with pytest.raises(Declined):
+        pair.a.send_bytes(pair.addr_b, "shot.png", PNG, group=("not-a-gid", "Lunch crew", []))
+    assert not offers
+
+
+def test_group_picture_whose_contents_are_not_a_picture_is_dropped(pair):
+    pair.b.offer_handler = lambda offer: True
+    with pytest.raises(DeliveryError):
+        pair.a.send_bytes(pair.addr_b, "shot.png", b"MZ" + os.urandom(1000),
+                          group=(GID, "Lunch crew", []))
+    wait_for(lambda: of_type(pair.eb, "file_failed"))
+    assert not of_type(pair.eb, "file_received")
+    assert not list(pair.inbox.iterdir())

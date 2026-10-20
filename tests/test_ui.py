@@ -1,4 +1,5 @@
-from whisper_im.ui import EMOJI, ME_COLOR, PEER_COLORS, speaker_color, whole_characters
+from whisper_im.ui import (EMOJI, ME_COLOR, PEER_COLORS, split_by_size, speaker_color,
+                           whole_characters)
 
 
 def test_a_speaker_keeps_their_colour():
@@ -39,6 +40,21 @@ def test_half_an_emoji_becomes_something_sendable():
     cleaned = whole_characters("a\ud83dX\ude00b")
     cleaned.encode()
     assert cleaned == "a\N{REPLACEMENT CHARACTER}X\N{REPLACEMENT CHARACTER}b"
+
+
+def test_pictures_over_the_limit_are_split_off_by_name(tmp_path):
+    small, big = tmp_path / "small.png", tmp_path / "big.jpg"
+    small.write_bytes(bytes(10))
+    big.write_bytes(bytes(11))
+    sources = [small, big, ("pasted.png", bytes(10)), ("huge.png", bytes(11))]
+    fit, too_big = split_by_size(sources, 10)
+    assert fit == [small, ("pasted.png", bytes(10))]
+    assert too_big == ["big.jpg", "huge.png"]
+
+
+def test_a_file_that_cannot_be_measured_is_not_split_off(tmp_path):
+    gone = tmp_path / "gone.png"
+    assert split_by_size([gone], 10) == ([gone], [])
 
 
 def test_picker_offers_each_emoji_once():

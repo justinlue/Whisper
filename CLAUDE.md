@@ -34,6 +34,7 @@ Tests set `WHISPER_HOME` to a temp dir and `WHISPER_ARGON2_TIME/MEM` low (see `t
 - `sweep()` runs only after the node has bound its port, so a refused second instance cannot delete the first one's files.
 - Anything arriving from the network is untrusted: validate types and lengths in `net.py`, and pass filenames through `sanitize_filename`. A received file's contents are decoded only by `images.py` (format check, pixel cap), off the Tk thread.
 - Groups are never persisted and have no coordinator: every group message carries the group's id, name and members, and a member keeps what it saw first.
+- A group picture is a file offer carrying the same group description, accepted without a prompt. So `net.py` declines it unasked unless it is named `.png`/`.jpg`/`.jpeg`, is 1 byte to `MAX_GROUP_PICTURE`, and its first bytes match the name; `ui.py` accepts only if the sender is a member (`Groups.receive`).
 - Tk 8.6 draws emoji in one colour and counts one as two characters. Colour emoji are Pillow-rendered images (`EmojiImages` in `ui.py`), optional at runtime; build chat text from pieces rather than computing Text indices.
 - A wire-format change needs a `VERSION` bump in `wire.py`; a history-format change needs a `FORMAT` bump in `history.py`.
 

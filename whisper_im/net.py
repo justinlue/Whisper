@@ -10,7 +10,7 @@ Events (all carry "type"):
     broadcast      addr, nick, text
     group          addr, nick, gid, name, members, text   (text "" = invitation)
     file_progress  addr, name, done, size
-    file_received  addr, nick, name, size, path
+    file_received  addr, nick, name, size, path, gid   (gid None = not a group's)
     file_failed    addr, name, error
     incompatible   ip
 """
@@ -27,6 +27,7 @@ from pathlib import Path
 from .config import DEFAULT_PORT, MAX_NICK
 from .files import PART_SUFFIX, sanitize_filename, unique_path
 from .groups import MAX_GROUP_MEMBERS, MAX_GROUP_NAME
+from .images import EXTENSIONS, sniff
 from .paths import files_dir
 from .wire import (KIND_CHUNK, IncompatibleVersion, ProtocolError, decode_datagram,
                    encode_datagram, handshake)
@@ -34,6 +35,9 @@ from .wire import (KIND_CHUNK, IncompatibleVersion, ProtocolError, decode_datagr
 CHUNK = 64 * 1024
 MAX_TEXT = 64 * 1024
 MAX_BROADCAST = 1000
+# A group picture is taken without asking, so it is held to more than a file:
+# PNG or JPEG by name and contents, and no larger than this.
+MAX_GROUP_PICTURE = 10 * 1024 * 1024
 CONNECT_TIMEOUT = 5
 IO_TIMEOUT = 30
 OFFER_TIMEOUT = 180
@@ -200,7 +204,10 @@ class Node:
         if not self._send_all({"t": "msg", "text": text}):
             raise DeliveryError("no network interface to broadcast on")
 
-    def send_file(self, addr: tuple[str, int], path, progress=None) -> None:
+    def send_file(self, addr: tuple[str, int], path, progress=None, group=None) -> None:
+        """`group`: (gid, name, others) for one member's copy of a group
+        picture, `others` as in send_group. The peer takes it unasked, so it
+        must be a picture of at most MAX_GROUP_PICTURE bytes."""
         path = Path(path)
         try:
             size = path.stat().st_size
@@ -208,21 +215,26 @@ class Node:
         except OSError as e:
             raise DeliveryError(f"cannot read file: {e}") from None
         with f:
-            self._send_stream(addr, path.name, size, f, progress)
+            self._send_stream(addr, path.name, size, f, progress, group)
 
     def send_bytes(self, addr: tuple[str, int], name: str, data: bytes,
-                   progress=None) -> None:
+                   progress=None, group=None) -> None:
         """Send `data` as a file called `name`, such as a pasted picture that
-        exists only in memory. The peer sees an ordinary file."""
-        self._send_stream(addr, name, len(data), io.BytesIO(data), progress)
+        exists only in memory. The peer sees an ordinary file. `group` as in
+        send_file."""
+        self._send_stream(addr, name, len(data), io.BytesIO(data), progress, group)
 
     # ── internals ────────────────────────────────────────────────────────────
 
-    def _send_stream(self, addr, name: str, size: int, f, progress) -> None:
+    def _send_stream(self, addr, name: str, size: int, f, progress, group=None) -> None:
+        offer = {"t": "file", "name": name, "size": size, **self._ident()}
+        if group is not None:
+            gid, group_name, others = group
+            offer["group"] = {"gid": gid, "name": group_name,
+                              "others": [list(member) for member in others]}
         ch = self._connect(addr)
         try:
-            ch.send_json({"t": "file", "name": name, "size": size,
-                          **self._ident()})
+            ch.send_json(offer)
             ch.sock.settimeout(OFFER_TIMEOUT)
             if ch.recv_json().get("t") != "accept":
                 raise Declined("declined")
@@ -451,7 +463,20 @@ class Node:
         if not isinstance(size, int) or size < 0:
             return
         name = sanitize_filename(msg.get("name", ""))
-        offer = {"addr": addr, "nick": nick, "name": name, "size": size}
+        group = picture = None
+        if "group" in msg:
+            raw = msg["group"]
+            group = _group_of(raw) if isinstance(raw, dict) else None
+            # A group picture is taken unasked, so anything that cannot be
+            # one is turned down before the owner hears of it.
+            picture = EXTENSIONS.get(Path(name).suffix.lower())
+            if (group is None or addr in group[2] or picture is None
+                    or not 0 < size <= MAX_GROUP_PICTURE):
+                ch.send_json({"t": "decline"})
+                return
+            gid, group_name, others = group
+            group = (gid, group_name, [addr, *others])
+        offer = {"addr": addr, "nick": nick, "name": name, "size": size, "group": group}
         handler = self.offer_handler
         if handler is None or not handler(offer) or self._is_blocked(addr[0]):
             ch.send_json({"t": "decline"})
@@ -463,18 +488,22 @@ class Node:
         try:
             with open(part, "wb") as f:
                 ch.send_json({"t": "accept"})
-                done, last = 0, -1
+                done, last, head = 0, -1, b""
                 while done < size:
                     kind, data = ch.recv()
                     if kind != KIND_CHUNK or not data or done + len(data) > size:
                         raise ProtocolError("unexpected data during transfer")
                     f.write(data)
+                    head += data[:8 - len(head)]
                     done += len(data)
                     pct = done * 100 // size
                     if pct != last:
                         last = pct
                         self._emit("file_progress", addr=addr, name=name,
                                    done=done, size=size)
+            # The contents must be what the name says, as for a pasted file.
+            if picture and sniff(head) != picture:
+                raise ProtocolError("not a picture")
             part.rename(path)
         except (OSError, ProtocolError) as e:
             part.unlink(missing_ok=True)
@@ -482,5 +511,5 @@ class Node:
                        error=str(e) or "connection lost")
             return
         self._emit("file_received", addr=addr, nick=nick, name=path.name,
-                   size=size, path=str(path))
+                   size=size, path=str(path), gid=group and group[0])
         ch.send_json({"t": "ack"})

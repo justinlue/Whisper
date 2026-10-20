@@ -20,7 +20,7 @@ from .groups import Groups
 from .history import WrongPin
 from .images import dib, from_clipboard, is_image_file, thumbnail
 from .markup import MENTION, MENTION_ME, emoji_pieces, mentions, mentions_me
-from .net import MAX_BROADCAST, MAX_TEXT, Declined, DeliveryError, Node
+from .net import MAX_BROADCAST, MAX_GROUP_PICTURE, MAX_TEXT, Declined, DeliveryError, Node
 from .paths import files_dir, incognito_dir
 from .session import Session
 
@@ -70,6 +70,27 @@ def human_size(n: float) -> str:
         if n < 1024 or unit == "GB":
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
         n /= 1024
+
+
+def split_by_size(sources, limit: int):
+    """(sources of at most `limit` bytes, names of the larger ones), for
+    sources as from_clipboard gives them. A file that cannot be measured is
+    kept, for sending to skip."""
+    fit, too_big = [], []
+    for source in sources:
+        if isinstance(source, tuple):
+            name, size = source[0], len(source[1])
+        else:
+            try:
+                name, size = os.path.basename(source), os.path.getsize(source)
+            except OSError:
+                fit.append(source)
+                continue
+        if size > limit:
+            too_big.append(name)
+        else:
+            fit.append(source)
+    return fit, too_big
 
 
 def parse_addr(text: str, default_port: int) -> tuple[str, int]:
@@ -655,6 +676,20 @@ class App:
             self.order.append(group.gid)
         return conv
 
+    def _join_group(self, addr, nick: str, gid: str, name: str, members):
+        """(conversation, whether we just joined) of the group that a message
+        or picture from `addr` says it belongs to; (None, False) if `addr` is
+        not in the group as we know it."""
+        self._conv(addr, nick)
+        new = self.groups.get(gid) is None
+        group = self.groups.receive(gid, name, members)
+        if group is None:
+            return None, False
+        conv = self._group_conv(group)
+        if new:
+            self._add_item(conv, kind="note", text=f"{nick} added you to this group.")
+        return conv, new
+
     def _new_group(self):
         peers = [(c.key, self._label(c)) for c in self.convs.values()
                  if c.is_peer and not c.blocked]
@@ -680,19 +715,24 @@ class App:
         threading.Thread(target=work, daemon=True).start()
 
     def _to_group(self, group, text: str, members) -> list:
-        """Send each of `members` their copy, all at once so one unreachable
-        member does not hold up the rest. Returns the members whose copy did
-        not arrive. Runs on a worker thread."""
+        """Send each of `members` their copy of a message. Returns the members
+        whose copy did not arrive. Runs on a worker thread."""
+        return self._to_members(members, lambda member: self.node.send_group(
+            member, group.gid, group.name, [m for m in group.members if m != member], text))
+
+    def _to_members(self, members, send) -> list:
+        """Call `send(member)` for each of `members`, all at once so one
+        unreachable member does not hold up the rest. Returns the members it
+        failed for. Runs on a worker thread."""
         missed = []
 
-        def send(member):
+        def attempt(member):
             try:
-                self.node.send_group(member, group.gid, group.name,
-                                     [m for m in group.members if m != member], text)
+                send(member)
             except (DeliveryError, OSError):
                 missed.append(member)
 
-        threads = [threading.Thread(target=send, args=(m,), daemon=True) for m in members]
+        threads = [threading.Thread(target=attempt, args=(m,), daemon=True) for m in members]
         for t in threads:
             t.start()
         for t in threads:
@@ -858,14 +898,20 @@ class App:
         if content is None or (not isinstance(content, list) and self._clipboard_text()):
             return None
         conv = self.convs[self.current]
-        if not conv.is_peer:
-            self._set_status("Pictures can be sent only in a one-to-one conversation")
+        if conv.key == EVERYONE:
+            self._set_status("Pictures can be sent in a one-to-one conversation or a group")
             return "break"
         sources, rejected = from_clipboard(content, time.time())
         if rejected:
             self._add_item(conv, kind="note",
                            text="Not sent, only .png and .jpg pictures can be pasted: "
                                 + ", ".join(rejected))
+        if conv.group:
+            sources, too_big = split_by_size(sources, MAX_GROUP_PICTURE)
+            if too_big:
+                self._add_item(conv, kind="note",
+                               text=f"Not sent, a picture in a group can be at most "
+                                    f"{human_size(MAX_GROUP_PICTURE)}: " + ", ".join(too_big))
         if sources:
             self._send_jobs(conv, sources)
         else:
@@ -887,7 +933,7 @@ class App:
             self._send_jobs(conv, paths)
 
     def _send_jobs(self, conv: Conversation, sources):
-        """Send each source to the peer: a path, read in place, or
+        """Send each source to the peer or group: a path, read in place, or
         (name, bytes) for a picture that exists only in memory."""
         items = []
         for source in sources:
@@ -909,24 +955,46 @@ class App:
 
     def _transfer(self, conv: Conversation, items):
         """Send the outgoing file items one after another on a worker thread."""
+        def send(addr, source, progress, group=None):
+            if isinstance(source, tuple):
+                self.node.send_bytes(addr, *source, progress, group)
+            else:
+                self.node.send_file(addr, source, progress, group)
+
         def work():
             for item in items:
                 source = item["source"]
                 def progress(done, size, name=item["name"]):
                     self.events.put({"type": "send_progress", "name": name,
                                      "done": done, "size": size})
-                error, status = None, "ok"
-                try:
-                    if isinstance(source, tuple):
-                        self.node.send_bytes(conv.key, *source, progress)
-                    else:
-                        self.node.send_file(conv.key, source, progress)
-                except Declined:
-                    status = "declined"
-                except (DeliveryError, OSError) as e:
-                    status, error = "failed", str(e) or "error"
+                error, status, reached, missed = None, "ok", True, []
+                if conv.group:
+                    group = conv.group
+                    # A retry goes only to the members the picture has not reached.
+                    targets = item.get("missed") or group.members
+                    done = dict.fromkeys(targets, 0)
+
+                    def to_member(member):
+                        def member_progress(sent, size):
+                            done[member] = sent
+                            progress(sum(done.values()), size * len(targets))
+                        others = [m for m in group.members if m != member]
+                        send(member, source, member_progress, (group.gid, group.name, others))
+
+                    missed = self._to_members(targets, to_member)
+                    reached = len(missed) < len(targets)
+                    if missed:
+                        status = "failed"
+                else:
+                    try:
+                        send(conv.key, source, progress)
+                    except Declined:
+                        status, reached = "declined", False
+                    except (DeliveryError, OSError) as e:
+                        status, error, reached = "failed", str(e) or "error", False
                 self.events.put({"type": "file_sent", "conv": conv, "item": item,
-                                 "status": status, "error": error})
+                                 "status": status, "error": error, "reached": reached,
+                                 "missed": missed})
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -972,20 +1040,15 @@ class App:
             mine = kind == "broadcast" and mentions_me(ev["text"], self.cfg["nickname"])
             self._incoming(conv, ev["nick"] if mine else None)
         elif kind == "group":
-            self._conv(ev["addr"], ev["nick"])
-            new = self.groups.get(ev["gid"]) is None
-            group = self.groups.receive(ev["gid"], ev["name"], ev["members"])
-            if group is None:
+            conv, new = self._join_group(ev["addr"], ev["nick"], ev["gid"], ev["name"],
+                                         ev["members"])
+            if conv is None:
                 return
-            conv = self._group_conv(group)
-            if new:
-                self._add_item(conv, kind="note",
-                               text=f"{ev['nick']} added you to this group.")
             if ev["text"]:
                 self._add_item(conv, kind="msg", out=False, nick=ev["nick"],
                                who=ev["addr"], text=ev["text"])
                 self.session.record(kind="group", dir="in", peer=ev["addr"][0],
-                                    nick=ev["nick"], group=group.name, text=ev["text"])
+                                    nick=ev["nick"], group=conv.group.name, text=ev["text"])
             if new or ev["text"]:
                 mine = mentions_me(ev["text"], self.cfg["nickname"])
                 self._incoming(conv, ev["nick"] if mine else None)
@@ -1022,23 +1085,35 @@ class App:
             self._set_status(f"{verb} {ev['name']} — {pct:.0f}%", pct)
         elif kind == "file_received":
             conv = self._conv(ev["addr"], ev["nick"])
+            # Accepting the offer put us in the group, so it is there.
+            group = ev["gid"] and self.groups.get(ev["gid"])
+            if group:
+                conv = self._group_conv(group)
             incognito = Path(ev["path"]).parent == incognito_dir()
             item = self._add_item(conv, kind="file", out=False, nick=ev["nick"],
                                   who=ev["addr"], name=ev["name"], size=ev["size"],
                                   path=ev["path"], incognito=incognito)
             self._attach_picture(conv, item, ev["path"])
             self.session.record(kind="file", dir="in", peer=ev["addr"][0], nick=ev["nick"],
-                                name=ev["name"], size=ev["size"], path=ev["path"])
+                                name=ev["name"], size=ev["size"], path=ev["path"],
+                                **({"group": group.name} if group else {}))
             self._set_status(f"Received {ev['name']}")
             self._incoming(conv)
         elif kind == "file_failed":
             self._set_status(f"Receiving {ev['name']} failed: {ev['error']}")
         elif kind == "file_sent":
             conv, item = ev["conv"], ev["item"]
+            item["missed"] = ev["missed"]
+            if ev["missed"]:
+                ev["error"] = "not delivered to " + ", ".join(map(self._name, ev["missed"]))
             item["status"], item["error"] = ev["status"], ev["error"]
-            if ev["status"] == "ok":
-                self.session.record(kind="file", dir="out", peer=conv.key[0],
-                                    name=item["name"], size=item["size"])
+            # A group picture that reached only some members was still sent.
+            if ev["reached"] and not item.get("recorded"):
+                item["recorded"] = True
+                where = ({"group": conv.group.name} if conv.group
+                         else {"peer": conv.key[0]})
+                self.session.record(kind="file", dir="out", name=item["name"],
+                                    size=item["size"], **where)
             self._set_status({"ok": "Sent ", "declined": "Declined: ",
                               "failed": "Failed: "}[ev["status"]] + item["name"])
             if conv.key == self.current:
@@ -1057,6 +1132,17 @@ class App:
     def _handle_offer(self, ev: dict):
         offer = ev["offer"]
         if time.monotonic() > ev["expires"]:
+            return
+        if offer["group"]:
+            # A group picture is taken unasked from a member; net.py has made
+            # sure it can only be a picture.
+            conv, new = self._join_group(offer["addr"], offer["nick"], *offer["group"])
+            if new:
+                self._render_list()
+            try:
+                ev["reply"].put_nowait(conv is not None)
+            except queue.Full:
+                pass
             return
         self._flash()
         fate = ("It will be deleted when you close Whisper (incognito)."

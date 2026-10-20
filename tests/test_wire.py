@@ -3,8 +3,10 @@ import threading
 
 import pytest
 
-from whisper_im.wire import (KIND_CHUNK, KIND_JSON, IncompatibleVersion, ProtocolError,
-                             decode_datagram, encode_datagram, handshake)
+from whisper_im.wire import (KIND_CHUNK, KIND_JSON, MAGIC, VERSION, IncompatibleVersion,
+                             ProtocolError, decode_datagram, encode_datagram, handshake)
+
+HEAD = MAGIC + bytes([VERSION])     # what starts a datagram of this version
 
 
 class Tap:
@@ -101,6 +103,12 @@ def test_version_mismatch_is_reported_by_both_ends():
     assert isinstance(b, IncompatibleVersion)
 
 
+def test_a_peer_from_before_group_pictures_is_incompatible():
+    a, b, _ = _pair(version_a=1, version_b=VERSION)
+    assert isinstance(a, IncompatibleVersion)
+    assert isinstance(b, IncompatibleVersion)
+
+
 def test_non_whisper_peer_is_rejected():
     a, b = socket.socketpair()
     a.settimeout(5)
@@ -121,8 +129,8 @@ def test_datagram_version_mismatch():
         decode_datagram(encode_datagram({"t": "hello"}, version=9))
 
 
-@pytest.mark.parametrize("data", [b"", b"WSP", b"XXXX\x01{}", b"WSPR\x01not json",
-                                  b"WSPR\x01[1,2]"])
+@pytest.mark.parametrize("data", [b"", b"WSP", b"XXXX\x01{}", HEAD + b"not json",
+                                  HEAD + b"[1,2]"])
 def test_garbage_datagrams_rejected(data):
     with pytest.raises(ProtocolError):
         decode_datagram(data)
@@ -135,9 +143,9 @@ HALF_EMOJI = rb'{"t": "msg", "text": "\ud83d"}'
 
 def test_datagram_with_half_an_emoji_is_rejected():
     with pytest.raises(ProtocolError):
-        decode_datagram(b"WSPR\x01" + HALF_EMOJI)
+        decode_datagram(HEAD + HALF_EMOJI)
     with pytest.raises(ProtocolError):
-        decode_datagram(b"WSPR\x01" + rb'{"t": "hello", "nick": {"\udc00": 1}}')
+        decode_datagram(HEAD + rb'{"t": "hello", "nick": {"\udc00": 1}}')
 
 
 def test_control_frame_with_half_an_emoji_is_rejected():
@@ -152,7 +160,7 @@ def test_control_frame_with_half_an_emoji_is_rejected():
 def test_emoji_sequences_survive_both_transports():
     text = "👍🏽 👨‍👩‍👧 🇨🇳 ❤️"
     assert decode_datagram(encode_datagram({"text": text})) == {"text": text}
-    assert decode_datagram(b"WSPR\x01" + rb'{"text": "\ud83d' + rb'\ude00"}') == {"text": "😀"}
+    assert decode_datagram(HEAD + rb'{"text": "\ud83d' + rb'\ude00"}') == {"text": "😀"}
     a, b, _ = _pair()
     a.send_json({"text": text})
     assert b.recv_json() == {"text": text}

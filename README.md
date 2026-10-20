@@ -44,15 +44,19 @@ Whisper can run per computer; a second launch reports that the port is taken.
   the name as it is shown; capitals do not matter.
 - **Send file…** works in a one-to-one conversation. The recipient is asked to
   accept each file. Your original is read in place; nothing is copied locally.
-- **Pictures**: in a one-to-one conversation, `Ctrl` + `V` in the box you type
-  in sends the picture on the clipboard: a screenshot or a picture copied
-  from a browser is sent as a `.png` (made in memory; nothing is saved on
-  your side), and `.png`, `.jpg` or `.jpeg` files copied in Explorer are sent
-  from where they are. Only PNG and JPEG are sent; any other copied file is
-  listed as not sent. If the clipboard holds text as well as a picture (as
-  Excel and Word do), the text is pasted. The recipient accepts a picture
-  like any file. PNG and JPEG pictures, sent or received, are shown in the
-  chat; right-click one and choose *Copy image* to put it on the clipboard.
+- **Pictures**: in a one-to-one conversation or a group, `Ctrl` + `V` in the
+  box you type in sends the picture on the clipboard: a screenshot or a
+  picture copied from a browser is sent as a `.png` (made in memory; nothing
+  is saved on your side), and `.png`, `.jpg` or `.jpeg` files copied in
+  Explorer are sent from where they are. Only PNG and JPEG are sent; any
+  other copied file is listed as not sent. If the clipboard holds text as
+  well as a picture (as Excel and Word do), the text is pasted. In a
+  one-to-one conversation the recipient accepts a picture like any file. In
+  a group it goes to every member and appears in the group without asking;
+  it can be at most 10 MB, and like a message, one that missed someone says
+  who and `retry` sends it to them alone. Everyone takes text only. PNG and
+  JPEG pictures, sent or received, are shown in the chat; right-click one and
+  choose *Copy image* to put it on the clipboard.
 - A message that could not be delivered is marked `✗ not delivered` with a
   `retry` link. Nothing is queued.
 - **Block** drops everything from that IP until you close Whisper.
@@ -102,6 +106,10 @@ Things incognito does **not** do:
 - Group messages travel the same encrypted way, one connection per member.
   A group is whatever its first message said it was: anyone can put you in a
   group, as anyone can message you, and only its members can speak in it.
+  A group picture is saved without asking, so Whisper takes one only from a
+  member, only as a `.png`, `.jpg` or `.jpeg` whose contents match, and only
+  up to 10 MB; anything else is refused. It is saved like any received file
+  (deleted on close in incognito).
 - Presence and the Everyone channel are plaintext.
 - The history file is AES-256-GCM under a key derived from the PIN with
   Argon2id (256 MiB). A numeric PIN is short: this keeps out someone browsing

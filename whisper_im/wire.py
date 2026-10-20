@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 MAGIC = b"WSPR"
-VERSION = 1
+VERSION = 2               # 2: a file offer can be a group's picture
 KIND_JSON = 1
 KIND_CHUNK = 2
 MAX_FRAME = 1 << 20
